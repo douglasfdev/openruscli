@@ -42,12 +42,6 @@ impl LlmProvider for OllamaAdapter {
             request_body["tools"] = serde_json::to_value(tools)?;
         }
 
-        println!("[DEBUG] Ollama Request URL: {}", &self.api_url);
-        println!(
-            "[DEBUG] Ollama Request Body: {}",
-            serde_json::to_string_pretty(&request_body).unwrap_or_default()
-        );
-
         let res = self
             .client
             .post(&self.api_url)
@@ -123,28 +117,31 @@ impl LlmProvider for OllamaAdapter {
                     Ok(chunk) => {
                         let lines = String::from_utf8_lossy(&chunk);
                         for line in lines.lines() {
-                            if line.trim().is_empty() {
-                                continue;
-                            }
-                            match serde_json::from_str::<serde_json::Value>(line) {
-                                Ok(json_val) => {
-                                    if let Some(content) = json_val["message"]["content"].as_str() {
-                                        if tx.send(Ok(content.to_string())).await.is_err() {
-                                            return;
+                            if line.starts_with("data: ") {
+                                let json_str = &line[6..];
+                                if json_str.trim().is_empty() || json_str == "[DONE]" {
+                                    continue;
+                                }
+                                match serde_json::from_str::<serde_json::Value>(json_str) {
+                                    Ok(json_val) => {
+                                        if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
+                                            if tx.send(Ok(content.to_string())).await.is_err() {
+                                                return;
+                                            }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    let error_msg = format!(
-                                        "Failed to parse stream chunk: {} | Chunk: '{}'",
-                                        e, line
-                                    );
-                                    if tx
-                                        .send(Err(AppError::LlmProviderError(error_msg)))
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
+                                    Err(e) => {
+                                        let error_msg = format!(
+                                            "Failed to parse stream chunk: {} | Chunk: '{}'",
+                                            e, json_str
+                                        );
+                                        if tx
+                                            .send(Err(AppError::LlmProviderError(error_msg)))
+                                            .await
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
                                     }
                                 }
                             }
