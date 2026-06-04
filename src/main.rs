@@ -23,9 +23,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenv().ok();
     let config = Config::from_env();
 
+    print!("Inicializando OpenCliru com o modelo '{}'...\n", config.ollama_model);
+    print!("Certifique-se de que o Ollama está rodando e o modelo '{}' está disponível.\n", config.ollama_api_url);
     let llm_provider = Arc::new(OllamaAdapter::new(
-        config.ollama_api_url.clone(),
         config.ollama_model.clone(),
+        config.ollama_api_url.clone(),
     ));
 
     let session_dir = PathBuf::from("sessions");

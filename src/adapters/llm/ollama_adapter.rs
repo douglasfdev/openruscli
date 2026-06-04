@@ -1,26 +1,68 @@
+use crate::domain::model::{FunctionCall, Message, Role, Tool, ToolCall};
+use crate::ports::llm_provider::{LlmProvider, LlmStream};
+use crate::shared::error::AppError;
 use async_trait::async_trait;
-use futures::{channel::mpsc, SinkExt, StreamExt};
-use reqwest::Client;
-use serde_json::json;
+use futures::stream::StreamExt;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use ulid::Ulid;
 
-use crate::{
-    domain::model::{Message, Role, Tool, ToolCall},
-    ports::llm_provider::{LlmProvider, LlmStream},
-    shared::error::AppError,
-};
+#[derive(Serialize, Clone)]
+struct OllamaRequest {
+    model: String,
+    messages: Vec<Message>,
+    tools: Vec<Tool>,
+    stream: bool,
+}
+
+// --- ESTRUTURAS DE RESPOSTA CORRIGIDAS ---
+
+// A resposta principal contém uma lista de "choices"
+#[derive(Deserialize, Debug)]
+struct OllamaCompletionResponse {
+    choices: Vec<OllamaChoice>,
+}
+
+// Cada "choice" na lista contém uma "message"
+#[derive(Deserialize, Debug)]
+struct OllamaChoice {
+    message: OllamaMessage,
+}
+
+// A "message" contém o conteúdo e as possíveis chamadas de ferramenta
+#[derive(Deserialize, Debug)]
+struct OllamaMessage {
+    role: String,
+    content: Option<String>,
+    tool_calls: Option<Vec<OllamaToolCall>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct OllamaToolCall {
+    function: OllamaFunctionCall,
+}
+
+#[derive(Deserialize, Debug)]
+struct OllamaFunctionCall {
+    name: String,
+    arguments: serde_json::Value,
+}
+
+// --- FIM DAS ESTRUTURAS DE RESPOSTA ---
+
 
 pub struct OllamaAdapter {
-    client: Client,
-    api_url: String,
+    client: reqwest::Client,
     model: String,
+    api_url: String,
 }
 
 impl OllamaAdapter {
-    pub fn new(api_url: String, model: String) -> Self {
+    pub fn new(model: String, api_url: String) -> Self {
         Self {
-            client: Client::new(),
-            api_url,
+            client: reqwest::Client::new(),
             model,
+            api_url,
         }
     }
 }
@@ -32,20 +74,24 @@ impl LlmProvider for OllamaAdapter {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<Message, AppError> {
-        let mut request_body = json!({
-            "model": self.model.clone(),
-            "messages": messages,
-            "stream": false,
-        });
+        let request = OllamaRequest {
+            model: self.model.clone(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            stream: false,
+        };
 
-        if !tools.is_empty() {
-            request_body["tools"] = serde_json::to_value(tools)?;
-        }
+        println!(
+            "[DEBUG] Ollama Request URL: {}",
+            self.api_url.clone() + "/chat/completions"
+        );
+        let request_body = serde_json::to_string_pretty(&request)?;
+        println!("[DEBUG] Ollama Request Body: {}", request_body);
 
         let res = self
             .client
-            .post(&self.api_url)
-            .json(&request_body)
+            .post(self.api_url.clone() + "/chat/completions")
+            .json(&request)
             .send()
             .await?;
 
@@ -59,19 +105,37 @@ impl LlmProvider for OllamaAdapter {
             )));
         }
 
-        let response_body: serde_json::Value = res.json().await?;
-        let message_json = response_body["message"].clone();
+        // Desserializa usando a nova struct correta
+        let mut response_body: OllamaCompletionResponse = res.json().await?;
 
-        let content = message_json["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let tool_calls: Option<Vec<ToolCall>> =
-            serde_json::from_value(message_json["tool_calls"].clone()).unwrap_or(None);
+        // Pega a mensagem da primeira "choice" da lista
+        if response_body.choices.is_empty() {
+            return Err(AppError::LlmProviderError(
+                "API returned no choices".to_string(),
+            ));
+        }
+        let ollama_message = response_body.choices.remove(0).message;
+
+        let tool_calls = if let Some(calls) = ollama_message.tool_calls {
+            let mut domain_calls = Vec::new();
+            for call in calls {
+                domain_calls.push(ToolCall {
+                    id: format!("call_{}", Ulid::new()),
+                    tool_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: call.function.name,
+                        arguments: call.function.arguments.to_string(),
+                    },
+                });
+            }
+            Some(domain_calls)
+        } else {
+            None
+        };
 
         Ok(Message {
             role: Role::Assistant,
-            content,
+            content: ollama_message.content.unwrap_or_default(),
             tool_calls,
             tool_call_id: None,
         })
@@ -82,36 +146,27 @@ impl LlmProvider for OllamaAdapter {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<LlmStream, AppError> {
-        let mut request_body = json!({
-            "model": self.model.clone(),
-            "messages": messages,
-            "stream": true,
-        });
+        let (tx, rx) = mpsc::channel(100);
 
-        if !tools.is_empty() {
-            request_body["tools"] = serde_json::to_value(tools)?;
-        }
+        let request = OllamaRequest {
+            model: self.model.clone(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            stream: true,
+        };
 
-        let res = self
-            .client
-            .post(&self.api_url)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        if !res.status().is_success() {
-            let error_body = res.text().await?;
-            return Err(AppError::LlmProviderError(format!(
-                "API Error: {}",
-                error_body
-            )));
-        }
-
-        let (mut tx, rx) = mpsc::unbounded();
-
-        let mut stream = res.bytes_stream();
+        let client = self.client.clone();
+        let url = self.api_url.clone() + "/chat/completions";
 
         tokio::spawn(async move {
+            let mut stream = match client.post(&url).json(&request).send().await {
+                Ok(res) => res.bytes_stream(),
+                Err(e) => {
+                    let _ = tx.send(Err(AppError::LlmProviderError(e.to_string()))).await;
+                    return;
+                }
+            };
+
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
@@ -124,7 +179,9 @@ impl LlmProvider for OllamaAdapter {
                                 }
                                 match serde_json::from_str::<serde_json::Value>(json_str) {
                                     Ok(json_val) => {
-                                        if let Some(content) = json_val["choices"][0]["delta"]["content"].as_str() {
+                                        if let Some(content) =
+                                            json_val["choices"][0]["delta"]["content"].as_str()
+                                        {
                                             if tx.send(Ok(content.to_string())).await.is_err() {
                                                 return;
                                             }
@@ -148,7 +205,11 @@ impl LlmProvider for OllamaAdapter {
                         }
                     }
                     Err(e) => {
-                        if tx.send(Err(AppError::from(e))).await.is_err() {
+                        if tx
+                            .send(Err(AppError::LlmProviderError(e.to_string())))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -156,6 +217,6 @@ impl LlmProvider for OllamaAdapter {
             }
         });
 
-        Ok(Box::pin(rx))
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }

@@ -9,7 +9,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Self {
-            ollama_api_url: env::var("OLLAMA_API_URL").unwrap_or_else(|_| "http://localhost:11434/api/chat".to_string()),
+            ollama_api_url: env::var("OLLAMA_API_URL").unwrap_or_else(|_| "http://localhost:11434/v1/chat/completions".to_string()),
             ollama_model: env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".to_string()),
         }
     }
