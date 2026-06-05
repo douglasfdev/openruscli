@@ -23,8 +23,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenv().ok();
     let config = Config::from_env();
 
-    print!("Inicializando OpenCliru com o modelo '{}'...\n", config.ollama_model);
-    print!("Certifique-se de que o Ollama está rodando e o modelo '{}' está disponível.\n", config.ollama_api_url);
     let llm_provider = Arc::new(OllamaAdapter::new(
         config.ollama_model.clone(),
         config.ollama_api_url.clone(),
@@ -32,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let session_dir = PathBuf::from("sessions");
     std::fs::create_dir_all(&session_dir)?;
-    let session_repository = Arc::new(FileSystemSessionRepository::new(session_dir));
+    let session_repository = Arc::new(FileSystemSessionRepository::new(session_dir.clone()));
 
     // Initialize tools
     let github_tool = Arc::new(GitHubToolAdapter::new()) as Arc<dyn ToolProvider>;
@@ -45,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tools,
     ));
 
-    if let Err(e) = run_interactive_session(use_case).await {
+    if let Err(e) = run_interactive_session(use_case, session_dir).await {
         eprintln!("Application error: {}", e);
     }
 

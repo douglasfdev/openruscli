@@ -9,6 +9,10 @@ impl SessionId {
     pub fn new() -> Self {
         Self(Ulid::new().to_string())
     }
+
+    pub fn from_str(value: &str) -> Self {
+        Self(value.to_string())
+    }
 }
 
 impl Default for SessionId {

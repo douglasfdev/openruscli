@@ -1,22 +1,61 @@
 use crate::{
     application::use_cases::process_prompt::ProcessPromptUseCase,
     domain::{
-        model::{Message, Role},
+        model::{Message, Role, Session},
         vo::SessionId,
     },
     shared::error::AppError,
 };
 use futures::StreamExt;
 use rustyline::{error::ReadlineError, Editor, history::DefaultHistory};
-use std::io::{self, Write};
-use std::sync::Arc;
+use std::{fs, io::{self, Write}, path::{Path, PathBuf}, sync::Arc};
 
-pub async fn run_interactive_session(use_case: Arc<ProcessPromptUseCase>) -> Result<(), AppError> {
+fn find_existing_session_id(session_dir: &Path) -> Option<SessionId> {
+    let mut candidates = match fs::read_dir(session_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("json"))
+                    .unwrap_or(false)
+            })
+            .filter_map(|entry| {
+                let metadata = entry.metadata().ok()?;
+                let modified = metadata.modified().ok()?;
+                let stem = entry.path().file_stem()?.to_str()?.to_string();
+                Some((modified, stem))
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    candidates.sort_by_key(|(modified, _)| *modified);
+    candidates.pop().map(|(_, stem)| SessionId::from_str(&stem))
+}
+
+pub async fn run_interactive_session(
+    use_case: Arc<ProcessPromptUseCase>,
+    session_dir: PathBuf,
+) -> Result<(), AppError> {
     let mut rl = Editor::<(), DefaultHistory>::new()?;
-    let session_id = SessionId::new();
+    let session_id = find_existing_session_id(&session_dir).unwrap_or_else(SessionId::new);
+    let session_path = session_dir.join(format!("{}.json", session_id));
+    let session_status = if session_path.exists() {
+        "retomada"
+    } else {
+        "iniciada"
+    };
 
-    println!("Sessão iniciada: {}", session_id);
+    println!("Sessão {}: {}", session_status, session_id);
     println!("Digite '.exit' para sair.");
+
+    if !session_path.exists() {
+        let session = Session::new_with_id(session_id.clone());
+        use_case.save_session(&session).await?;
+    }
 
     loop {
         let readline = rl.readline(">> ");
