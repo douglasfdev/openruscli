@@ -44,6 +44,16 @@ pub struct Tool {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillDefinition {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<Vec<String>>,
+    pub tools: Vec<Tool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FunctionDefinition {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -4,8 +4,6 @@ services:
     container_name: ollama
     ports:
       - "11434:11434"
-    environment:
-      - OLLAMA_API_KEY=79577430a6f0487296b1e42051f2019c.a8-pAMumGzrASfCdky4Dnov4
     entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull qwen3.6:35b && wait"]
     volumes:
       - ollama:/root/.ollama

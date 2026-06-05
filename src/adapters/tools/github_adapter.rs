@@ -1,6 +1,6 @@
 use crate::{
-    domain::model::{FunctionDefinition, Tool},
-    ports::tool_provider::ToolProvider,
+    domain::model::{FunctionDefinition, SkillDefinition, Tool},
+    ports::skill_provider::SkillProvider,
     shared::error::AppError,
 };
 use async_trait::async_trait;
@@ -79,14 +79,56 @@ fn normalize_argument_value(value: &Value) -> Value {
     match value {
         Value::String(s) => {
             let trimmed = s.trim();
-            if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                    return parsed;
-                }
+            if let Some(parsed) = parse_json_string(trimmed) {
+                return parsed;
             }
             Value::String(s.clone())
         }
+        Value::Object(map) if map.len() == 1 && map.contains_key("arguments") => {
+            let inner = &map["arguments"];
+            normalize_argument_value(inner)
+        }
         other => other.clone(),
+    }
+}
+
+fn parse_json_string(input: &str) -> Option<Value> {
+    let trimmed = input.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            return Some(parsed);
+        }
+    }
+
+    if trimmed.starts_with('"') && trimmed.ends_with('"') {
+        let unquoted = trimmed.trim_matches('"').trim();
+        if unquoted.starts_with('{') || unquoted.starts_with('[') {
+            if let Ok(parsed) = serde_json::from_str::<Value>(unquoted) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_arguments(arguments: Value) -> Value {
+    if let Some(parsed) = parse_json_string(arguments.as_str().unwrap_or_default()) {
+        return normalize_arguments(parsed);
+    }
+
+    match arguments {
+        Value::Object(map) => {
+            if let Some(inner) = map.get("arguments") {
+                if let Value::String(_) | Value::Object(_) = inner {
+                    let mut normalized_map = map.clone();
+                    normalized_map.insert("arguments".to_string(), normalize_argument_value(inner));
+                    return Value::Object(normalized_map);
+                }
+            }
+            Value::Object(map)
+        }
+        other => other,
     }
 }
 
@@ -94,6 +136,7 @@ fn get_string_field(arguments: &Value, key: &str) -> Option<String> {
     match normalize_argument_value(&arguments[key]) {
         Value::String(value) => Some(value),
         Value::Number(num) => Some(num.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
 }
@@ -103,11 +146,9 @@ fn get_array_field(arguments: &Value, key: &str) -> Option<Vec<Value>> {
         Value::Array(array) => Some(array),
         Value::String(value) => {
             let trimmed = value.trim();
-            if trimmed.starts_with('[') || trimmed.starts_with('{') {
-                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                    if let Value::Array(array) = parsed {
-                        return Some(array);
-                    }
+            if let Some(parsed) = parse_json_string(trimmed) {
+                if let Value::Array(array) = parsed {
+                    return Some(array);
                 }
             }
             None
@@ -117,8 +158,22 @@ fn get_array_field(arguments: &Value, key: &str) -> Option<Vec<Value>> {
 }
 
 #[async_trait]
-impl ToolProvider for GitHubToolAdapter {
-    // A função agora retorna uma lista de definições de ferramentas
+impl SkillProvider for GitHubToolAdapter {
+    fn get_skill_definition(&self) -> SkillDefinition {
+        SkillDefinition {
+            name: "github".to_string(),
+            description: Some("GitHub operations skill for repository and commit management.".to_string()),
+            keywords: Some(vec![
+                "github".to_string(),
+                "repo".to_string(),
+                "commit".to_string(),
+                "push".to_string(),
+                "github repository".to_string(),
+            ]),
+            tools: self.tools.values().cloned().collect(),
+        }
+    }
+
     fn get_tool_definitions(&self) -> Vec<Tool> {
         let tools_vec: Vec<Tool> = self.tools.values().cloned().collect();
         tools_vec
@@ -144,7 +199,10 @@ impl ToolProvider for GitHubToolAdapter {
                 Ok(mock_response)
             }
             "commit_and_push" => {
+                let arguments = normalize_arguments(arguments.clone());
                 println!("[Tool Execution] Called commit_and_push.");
+                println!("[Tool Execution] commit_and_push normalized arguments: {}", arguments);
+
                 let owner = get_string_field(&arguments, "owner").unwrap_or_default();
                 let repo = get_string_field(&arguments, "repo").unwrap_or_default();
                 let branch = get_string_field(&arguments, "branch").unwrap_or_default();
